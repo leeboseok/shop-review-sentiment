@@ -32,7 +32,7 @@ def get_db_connection():
     try:
         conn = pymysql.connect(
             **DB_CONFIG,
-            cursorclass=pymysql.cursors.DictCursor,  # 💡 딕셔너리 형태로 결과 받기
+            cursorclass=pymysql.cursors.DictCursor,
             charset='utf8mb4'
         )
         return conn
@@ -51,44 +51,6 @@ def train(document, y):
     X = vectorizer.transform([document])
     clf.best_estimator_.partial_fit(X, [y])
 
-def mysql_entry(document, y, proba):
-    conn = get_db_connection()
-    if conn is None:
-        print("DB 연결 실패, 리뷰 저장 불가")
-        return
-    try:
-        cursor = conn.cursor()
-        query = "INSERT INTO review (review, sentiment, probability, date) VALUES (%s, %s, %s, NOW())"
-        cursor.execute(query, (document, y, proba))
-        conn.commit()
-        print("리뷰 저장 완료!")
-    except pymysql.MySQLError as err:
-        print(f"MySQL 오류: {err}")
-    finally:
-        cursor.close()
-        conn.close()
-
-
-def save_feedback(document, original_sentiment, corrected_sentiment, feedback_type, probability):
-    conn = get_db_connection()
-    if conn is None:
-        print("DB 연결 실패, 피드백 저장 불가")
-        return
-    try:
-        cursor = conn.cursor()
-        query = """
-            INSERT INTO feedback (review, original_sentiment, corrected_sentiment, feedback_type, probability)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        cursor.execute(query, (document, original_sentiment, corrected_sentiment, feedback_type, probability))
-        conn.commit()
-        print("피드백 저장 완료!")
-    except pymysql.MySQLError as err:
-        print(f"MySQL 오류: {err}")
-    finally:
-        cursor.close()
-        conn.close()
-
 # 요청 모델
 class ReviewRequest(BaseModel):
     review_text: str
@@ -104,7 +66,23 @@ async def analyze_sentiment(request: ReviewRequest):
     inv_label = {'negative': 0, 'positive': 1}
     y = inv_label[sentiment]
     per_proba = round(proba * 100, 2)
-    mysql_entry(request.review_text, y, per_proba)
+    
+    # DB 저장 로직을 직접 구현
+    conn = get_db_connection()
+    if conn is not None:
+        try:
+            cursor = conn.cursor()
+            query = "INSERT INTO review (review, sentiment, probability, date) VALUES (%s, %s, %s, NOW())"
+            cursor.execute(query, (request.review_text, y, per_proba))
+            conn.commit()
+            print("리뷰 저장 완료!")
+        except pymysql.MySQLError as err:
+            print(f"MySQL 오류: {err}")
+        finally:
+            cursor.close()
+            conn.close()
+    else:
+        print("DB 연결 실패, 리뷰 저장 불가")
 
     return {
         "review_text": request.review_text,
@@ -133,14 +111,25 @@ async def feedback(request: FeedbackRequest):
     sentiment_label = label_map[y_original]
     corrected_label = label_map[y_corrected]
 
-    # 피드백 저장
-    save_feedback(
-        document=request.review_text,
-        original_sentiment=sentiment_label,
-        corrected_sentiment=corrected_label,
-        feedback_type=request.feedback,
-        probability=per_prob
-    )
+    # 피드백 저장 로직을 직접 구현
+    conn = get_db_connection()
+    if conn is not None:
+        try:
+            cursor = conn.cursor()
+            query = """
+                INSERT INTO feedback (review, original_sentiment, corrected_sentiment, feedback_type, probability)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            cursor.execute(query, (request.review_text, sentiment_label, corrected_label, request.feedback, per_prob))
+            conn.commit()
+            print("피드백 저장 완료!")
+        except pymysql.MySQLError as err:
+            print(f"MySQL 오류: {err}")
+        finally:
+            cursor.close()
+            conn.close()
+    else:
+        print("DB 연결 실패, 피드백 저장 불가")
 
     return {
         "message": "피드백이 저장되고, 모델이 업데이트되었습니다.",
@@ -149,16 +138,6 @@ async def feedback(request: FeedbackRequest):
         "probability": per_prob
     }
 
-    # DB 저장
-    save_feedback(
-        document=request.review_text,
-        original_sentiment=sentiment_label,
-        corrected_sentiment=corrected_label,
-        feedback_type=request.feedback,
-        probability=per_prob
-    )
-
-    return {"message": "피드백이 저장되고, 모델이 업데이트되었습니다."}
 
 @app.post("/analyze-batch/")
 async def analyze_batch(reviews: List[ReviewRequest]):
@@ -364,7 +343,7 @@ def get_weekly_review_stats():
         cursor.close()
         conn.close()
 
-@app.get("reviews/stats/monthlysentiment")
+@app.get("/reviews/stats/monthlysentiment")
 def get_monthly_review_stats_sentiment():
     conn = get_db_connection()
     if conn is None:
